@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <title>ももちゃんのくりまんじゅうビッグバン - 運搬強化版</title>
+  <style>
+    body { font-family: sans-serif; text-align: center; background: #111; color: #fff; margin: 0; padding: 10px; user-select: none; }
+    #game-container { position: relative; width: 360px; height: 640px; margin: 0 auto; overflow: hidden; border: 3px solid #d2691e; border-radius: 12px; }
+    canvas { background: #2b1d0c; display: block; cursor: pointer; }
+    
+    .ui-top { position: absolute; top: 10px; left: 10px; right: 10px; background: rgba(0,0,0,0.85); padding: 8px; border-radius: 8px; font-weight: bold; font-size: 13px; text-align: left; pointer-events: none; }
+    #status-msg { position: absolute; bottom: 15px; left: 10px; right: 10px; color: #ffeb3b; font-weight: bold; font-size: 12px; background: rgba(0,0,0,0.85); padding: 8px; border-radius: 6px; pointer-events: none; }
+    
+    @keyframes red-flash {
+      0% { box-shadow: inset 0 0 10px rgba(255, 0, 0, 0.3); }
+      50% { box-shadow: inset 0 0 70px rgba(255, 0, 0, 0.95); }
+      100% { box-shadow: inset 0 0 10px rgba(255, 0, 0, 0.3); }
+    }
+    .pinch-mode { animation: red-flash 0.3s infinite; border-color: #ff0000 !important; }
+
+    @keyframes white-flash {
+      0% { background: #fff; }
+      100% { background: #2b1d0c; }
+    }
+    .flash-bg { animation: white-flash 0.2s ease-out; }
+  </style>
+</head>
+<body>
+
+  <div id="game-container">
+    <canvas id="canvas" width="360" height="640"></canvas>
+    
+    <div class="ui-top">
+      <div>目標：100億個のビッグバンを阻止！</div>
+      <div style="color: #ffcc00; font-size: 16px; margin: 2px 0;">くりまんじゅう: <span id="count-txt">100,000</span> 個</div>
+      <div>所持数: <span id="holding-txt">0</span> / 10 個 | 残り: <span id="time-txt">60</span> 秒</div>
+    </div>
+
+    <div id="status-msg">栗を拾って右下の「納品ポイント」へ運べ！</div>
+  </div>
+
+<script>
+function sendGA4Event(eventName, params = {}) {
+  console.log(`[GA4 Event] ${eventName}`, params);
+  if (typeof gtag === 'function') gtag('event', eventName, params);
+}
+
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const container = document.getElementById('game-container');
+
+// ゲームステート
+let count = 100000; // 初手 100,000個（大暴走スタート）
+const maxCount = 10000000000; // 100億個
+let timeLeft = 60;
+let phase = 1;
+let lastMultiply = Date.now();
+
+// プレイヤー（運搬）ステート
+let playerX = 180, playerY = 320;
+let holdingCount = 0;
+const maxHolding = 10; // 持てる上限 10個
+
+// 納品ポイント（右下エリア）
+const deliverPoint = { x: 270, y: 530, w: 80, h: 80 };
+
+// KIDちゃん（補助役）
+let kidState = 'NORMAL';
+let kidX = 20, kidY = 530, kidW = 70, kidH = 70;
+
+// 爆発栗まんじゅう（EX栗）
+let bombManjus = [];
+
+// 通算失敗回数
+let gameOverCount = parseInt(localStorage.getItem('momo_gameover_count') || '0');
+
+let isDragging = false;
+
+sendGA4Event('game_start');
+const timerInterval = setInterval(() => {
+  if (phase === 1 && timeLeft > 0) {
+    timeLeft--;
+
+    // 爆発栗まんじゅうの湧き
+    const progress = (60 - timeLeft) / 60;
+    if (Math.random() < 0.2 + (progress * 0.25) && bombManjus.length < 3) {
+      bombManjus.push({
+        x: 50 + Math.random() * 260,
+        y: 150 + Math.random() * 300,
+        r: 16
+      });
+    }
+
+  } else if (timeLeft <= 0 && phase === 1) {
+    phase = 2; // クリア！
+    sendGA4Event('game_clear', { remaining_time: timeLeft });
+    clearInterval(timerInterval);
+  }
+}, 1000);
+
+function gameLoop() {
+  update();
+  draw();
+  if (phase === 1) requestAnimationFrame(gameLoop);
+}
+
+function update() {
+  if (phase !== 1) return;
+  const now = Date.now();
+
+  // 1. 増殖ロジック（1.0秒->0.08秒, 1.4倍->2.0倍）
+  const progress = (60 - timeLeft) / 60;
+  const interval = 1000 - (progress * 920);
+  const mult = 1.4 + (progress * 0.6);
+
+  if (now - lastMultiply > interval) {
+    count = Math.min(maxCount, Math.ceil(count * mult));
+    
+    // 2. KIDちゃんの処理（弱体化：あくまで補助）
+    if (kidState === 'NORMAL') {
+      const eat = Math.ceil(count * 0.03) + 10;
+      count = Math.max(1000, count - eat);
+    } else if (kidState === 'GUTS') {
+      const eat = Math.ceil(count * 0.10) + 30;
+      count = Math.max(500, count - eat);
+    }
+
+    lastMultiply = now;
+  }
+
+  // 3. 納品エリア判定
+  if (playerX >= deliverPoint.x && playerX <= deliverPoint.x + deliverPoint.w &&
+      playerY >= deliverPoint.y && playerY <= deliverPoint.y + deliverPoint.h) {
+    if (holdingCount > 0) {
+      // 納品実行！持っている数に応じた固定・割合処理（運搬による削減）
+      const deliveredEat = Math.ceil(count * (0.05 * holdingCount)); // 10個で最大50%削減！
+      count = Math.max(0, count - deliveredEat);
+      holdingCount = 0; // 空にする
+    }
+  }
+
+  // 4. ピンチ・ゲームオーバー判定
+  const fillRatio = Math.min(1.0, Math.log10(count) / Math.log10(maxCount));
+  if (fillRatio >= 0.75) container.classList.add('pinch-mode');
+  else container.classList.remove('pinch-mode');
+
+  if (count >= maxCount) {
+    phase = 3;
+    gameOverCount++;
+    localStorage.setItem('momo_gameover_count', gameOverCount.toString());
+    sendGA4Event('game_over', { final_count: count, attempts: gameOverCount });
+  }
+
+  // UI更新
+  document.getElementById('count-txt').innerText = count.toLocaleString();
+  document.getElementById('holding-txt').innerText = holdingCount;
+  document.getElementById('time-txt').innerText = timeLeft;
+
+  const msg = document.getElementById('status-msg');
+  if (kidState === 'CHOKED') {
+    msg.innerText = "【ピンチ！】KIDが喉を詰まらせた！連打で救出！";
+    msg.style.color = "#ff4444";
+  } else if (holdingCount >= maxHolding) {
+    msg.innerText = "【満タン！】右下の納品エリアへ急げ！";
+    msg.style.color = "#ffeb3b";
+  } else {
+    msg.innerText = "指で栗を拾い（最大10個）、右下へ運んで納品せよ！";
+    msg.style.color = "#ffffff";
+  }
+}
+
+function draw() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  if (phase === 2) {
+    container.classList.remove('pinch-mode');
+    ctx.fillStyle = '#050510'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = '#ffcc00'; ctx.font = 'bold 20px sans-serif';
+    ctx.fillText("【100億個誤出荷クリア！】", 45, 260);
+    ctx.font = '13px sans-serif'; ctx.fillStyle = '#fff';
+    ctx.fillText("ももちゃん「あいつ……むちゃしやがって。」", 40, 320);
+    return;
+  }
+
+  if (phase === 3) {
+    container.classList.remove('pinch-mode');
+    ctx.fillStyle = '#1a0000'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = '#ff4444'; ctx.font = 'bold 22px sans-serif';
+    ctx.fillText("100億個突破：GAME OVER", 35, 220);
+
+    ctx.font = 'bold 15px sans-serif'; ctx.fillStyle = '#ffeb3b';
+    if (gameOverCount === 1) ctx.fillText("【1回目】厨房が栗まんじゅうで完全埋没！", 30, 300);
+    else if (gameOverCount === 2) ctx.fillText("【2回目】KIDちゃんが袋詰めに絶望して逃走！", 25, 300);
+    else ctx.fillText("【3回目〜】地球全体が栗まんじゅうに呑み込まれた…", 15, 300);
+    
+    ctx.font = '12px sans-serif'; ctx.fillStyle = '#aaa';
+    ctx.fillText(`通算失敗回数: ${gameOverCount}回`, 120, 360);
+    return;
+  }
+
+  // --- 描画レイヤー ---
+  // 1. 栗の積もり背景
+  const fillRatio = Math.min(1.0, Math.log10(count) / Math.log10(maxCount));
+  const fillH = fillRatio * 380;
+  ctx.fillStyle = '#6e3811';
+  ctx.fillRect(0, canvas.height - fillH, canvas.width, fillH);
+
+  // 2. 納品ポイント（右下エリア）
+  ctx.fillStyle = 'rgba(76, 175, 80, 0.4)';
+  ctx.fillRect(deliverPoint.x, deliverPoint.y, deliverPoint.w, deliverPoint.h);
+  ctx.strokeStyle = '#4caf50'; ctx.lineWidth = 3;
+  ctx.strokeRect(deliverPoint.x, deliverPoint.y, deliverPoint.w, deliverPoint.h);
+  ctx.fillStyle = '#fff'; ctx.font = 'bold 12px sans-serif';
+  ctx.fillText("📦納品所", deliverPoint.x + 15, deliverPoint.y + 45);
+
+  // 3. KIDちゃん（左下）
+  ctx.fillStyle = kidState === 'CHOKED' ? '#d32f2f' : (kidState === 'GUTS' ? '#f57c00' : '#795548');
+  ctx.fillRect(kidX, kidY, kidW, kidH);
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.strokeRect(kidX, kidY, kidW, kidH);
+  ctx.fillStyle = '#fff'; ctx.font = 'bold 10px sans-serif';
+  if (kidState === 'CHOKED') ctx.fillText("🐿️KID(窒息!)", kidX, kidY - 5);
+  else ctx.fillText("🐿️KID(補助)", kidX + 5, kidY - 5);
+
+  // 4. 爆発栗まんじゅう（EX栗）
+  bombManjus.forEach(b => {
+    ctx.fillStyle = '#111'; ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = '#ff3300'; ctx.lineWidth = 2; ctx.stroke();
+    ctx.fillStyle = '#ff5500'; ctx.font = 'bold 10px sans-serif'; ctx.fillText("💥", b.x - 6, b.y + 4);
+  });
+
+  // 5. プレイヤー（ももちゃん仮表示）＆所持栗の表示
+  ctx.fillStyle = '#ffeb3b';
+  ctx.beginPath(); ctx.arc(playerX, playerY, 20, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = '#d2691e'; ctx.lineWidth = 3; ctx.stroke();
+  
+  ctx.fillStyle = '#000'; ctx.font = 'bold 12px sans-serif';
+  ctx.fillText(`🍑${holdingCount}`, playerX - 10, playerY + 4);
+}
+
+// 操作処理（ドラッグ＝拾う・移動）
+function handleInput(x, y) {
+  if (phase !== 1) return;
+  playerX = x; playerY = y; // プレイヤー追従
+
+  // 1. KIDちゃんタップ救出
+  if (x >= kidX && x <= kidX + kidW && y >= kidY && y <= kidY + kidH) {
+    if (kidState === 'CHOKED') {
+      kidState = 'GUTS';
+      sendGA4Event('kid_binta');
+      setTimeout(() => { kidState = 'NORMAL'; }, 3500);
+    }
+  }
+
+  // 2. 栗を拾う（上限10個まで）
+  if (holdingCount < maxHolding) {
+    holdingCount = Math.min(maxHolding, holdingCount + 1);
+  }
+
+  // 3. 爆発栗（EX栗）接触判定
+  for (let i = bombManjus.length - 1; i >= 0; i--) {
+    const b = bombManjus[i];
+    const dist = Math.hypot(x - b.x, y - b.y);
+    
+    if (dist < 20 + b.r) {
+      bombManjus.splice(i, 1);
+      
+      // 爆発：所持栗を全ドロップ＆KID喉詰まり
+      holdingCount = 0; // ★0個に散らばる！
+      kidState = 'CHOKED';
+      
+      container.classList.add('flash-bg');
+      setTimeout(() => container.classList.remove('flash-bg'), 200);
+      break;
+    }
+  }
+}
+
+canvas.addEventListener('mousedown', (e) => { isDragging = true; const r = canvas.getBoundingClientRect(); handleInput(e.clientX - r.left, e.clientY - r.top); });
+canvas.addEventListener('mousemove', (e) => { if (isDragging) { const r = canvas.getBoundingClientRect(); handleInput(e.clientX - r.left, e.clientY - r.top); } });
+window.addEventListener('mouseup', () => { isDragging = false; });
+
+canvas.addEventListener('touchstart', (e) => { isDragging = true; const r = canvas.getBoundingClientRect(); handleInput(e.touches[0].clientX - r.left, e.touches[0].clientY - r.top); }, { passive: true });
+canvas.addEventListener('touchmove', (e) => { if (isDragging) { const r = canvas.getBoundingClientRect(); handleInput(e.touches[0].clientX - r.left, e.clientY - r.top); } }, { passive: true });
+window.addEventListener('touchend', () => { isDragging = false; });
+
+gameLoop();
+</script>
+</body>
+</html>
