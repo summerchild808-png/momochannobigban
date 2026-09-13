@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>ももちゃんのくりまんじゅうビッグバン</title>
+  <!-- Google tag (gtag.js) -->
+  <script async src="https://www.googletagmanager.com/gtag/js?id=G-YOUR-MEASUREMENT-ID"></script>
+  <script>
+    window.dataLayer = window.dataLayer || [];
+    function gtag(){dataLayer.push(arguments);}
+    gtag('js', new Date());
+    gtag('config', 'G-YOUR-MEASUREMENT-ID');
+  </script>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: sans-serif; text-align: center; background: #111; color: #fff; margin: 0; padding: 0; user-select: none; -webkit-user-select: none; overflow: hidden; }
+    #game-container { position: relative; width: 360px; height: 640px; margin: 0 auto; overflow: hidden; border: 3px solid #d2691e; border-radius: 12px; background: #000; }
+    canvas { display: block; cursor: pointer; }
+    
+    /* オープニング紙芝居 */
+    #story-overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: #000; z-index: 20; display: flex; flex-direction: column; justify-content: center; align-items: center; cursor: pointer; }
+    #story-img { width: 100%; height: 100%; object-fit: contain; }
+    #skip-btn { position: absolute; top: 12px; right: 12px; background: rgba(0,0,0,0.7); color: #fff; border: 1px solid #fff; padding: 6px 14px; border-radius: 20px; font-size: 12px; font-weight: bold; cursor: pointer; z-index: 21; }
+
+    /* UIヘッダー・フッター */
+    .ui-top { position: absolute; top: 10px; left: 10px; right: 10px; background: rgba(0,0,0,0.75); padding: 8px 12px; border-radius: 8px; font-weight: bold; font-size: 13px; text-align: left; pointer-events: none; z-index: 10; border: 1px solid #d2691e; }
+    #status-msg { position: absolute; bottom: 12px; left: 10px; right: 10px; color: #ffeb3b; font-weight: bold; font-size: 12px; background: rgba(0,0,0,0.85); padding: 8px; border-radius: 6px; pointer-events: none; z-index: 10; }
+    
+    /* 危険演出 */
+    @keyframes red-flash {
+      0% { box-shadow: inset 0 0 10px rgba(255, 0, 0, 0.3); }
+      50% { box-shadow: inset 0 0 70px rgba(255, 0, 0, 0.95); }
+      100% { box-shadow: inset 0 0 10px rgba(255, 0, 0, 0.3); }
+    }
+    .pinch-mode { animation: red-flash 0.3s infinite; border-color: #ff0000 !important; }
+
+    @keyframes white-flash {
+      0% { background: #fff; }
+      100% { background: transparent; }
+    }
+    .flash-bg { animation: white-flash 0.2s ease-out; }
+  </style>
+</head>
+<body>
+
+  <div id="game-container">
+    <!-- 初回オープニング紙芝居 -->
+    <div id="story-overlay">
+      <button id="skip-btn" onclick="startGame()">SKIP▶</button>
+      <img id="story-img" src="" alt="ストーリー">
+    </div>
+
+    <canvas id="canvas" width="360" height="640"></canvas>
+    
+    <div class="ui-top">
+      <div>目標：100億個のビッグバンを阻止！</div>
+      <div style="color: #ffcc00; font-size: 16px; margin: 2px 0;">くりまんじゅう: <span id="count-txt">100,000</span> 個</div>
+      <div>所持数: <span id="holding-txt">0</span> / 10 個 | 残り: <span id="time-txt">60</span> 秒</div>
+    </div>
+
+    <div id="status-msg">栗を拾って右下の「納品ポイント」へ運べ！</div>
+  </div>
+
+<script>
+// --- GA4 イベント送信 ---
+function sendGA4Event(eventName, params = {}) {
+  console.log(`[GA4 Event] ${eventName}`, params);
+  if (typeof gtag === 'function') gtag('event', eventName, params);
+}
+
+// --- 画像アセットの事前読み込み ---
+const images = {};
+const assetSources = {
+  bg: 'op_bg.png',
+  logo: 'title_logo.png',
+  kurimanju: 'kurimanju.png',
+  stack_s: 'kurimanju_stack_s.png',
+  stack_m: 'kurimanju_stack_m.png',
+  stack_l: 'kurimanju_stack_l.png',
+  kid_work_1: 'kid_work_1.png',
+  kid_work_2: 'kid_work_2.png',
+  kid_work_3: 'kid_work_3.png',
+  kid_work_4: 'kid_work_4.png',
+  kid_work_5: 'kid_work_5.png',
+  kid_choked: 'kid_choked.png',
+  kid_guts: 'kid_guts.png'
+};
+
+let loadedCount = 0;
+const totalAssets = Object.keys(assetSources).length;
+for (let key in assetSources) {
+  images[key] = new Image();
+  images[key].src = assetSources[key];
+  images[key].onload = () => { loadedCount++; };
+}
+
+// --- オープニング紙芝居制御 ---
+const storyImages = ['story_1.png', 'story_2.png', 'story_3.png'];
+let currentStoryIndex = 0;
+const storyOverlay = document.getElementById('story-overlay');
+const storyImg = document.getElementById('story-img');
+const hasPlayed = localStorage.getItem('hasPlayedMomoGame');
+
+if (!hasPlayed) {
+  storyImg.src = storyImages[0];
+  storyOverlay.addEventListener('click', advanceStory);
+} else {
+  storyOverlay.style.display = 'none';
+  initGame();
+}
+
+function advanceStory(e) {
+  if (e.target.id === 'skip-btn') return;
+  currentStoryIndex++;
+  if (currentStoryIndex < storyImages.length) {
+    storyImg.src = storyImages[currentStoryIndex];
+  } else {
+    startGame();
+  }
+}
+
+function startGame() {
+  localStorage.setItem('hasPlayedMomoGame', 'true');
+  storyOverlay.style.display = 'none';
+  initGame();
+}
+
+// --- メインゲーム処理 ---
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const container = document.getElementById('game-container');
+
+let count = 100000; // 初期値 100,000個
+const maxCount = 10000000000;
+let timeLeft = 60;
+let phase = 0; // 0:待機, 1:プレイ中, 2:クリア, 3:ゲームオーバー
+let lastMultiply = Date.now();
+
+// プレイヤー＆納品処理
+let playerX = 180, playerY = 320;
+let holdingCount = 0;
+const maxHolding = 10;
+const deliverPoint = { x: 260, y: 520, w: 90, h: 90 };
+
+// KIDちゃんアニメーション＆状態
+let kidState = 'NORMAL'; // NORMAL, CHOKED, GUTS
+let kidAnimFrame = 0;
+let kidAnimTimer = Date.now();
+const kidWorkFrames = ['kid_work_1', 'kid_work_2', 'kid_work_3', 'kid_work_4', 'kid_work_5'];
+const kidX = 10, kidY = 510, kidW = 80, kidH = 80;
+
+// 爆発栗（EX栗）
+let bombManjus = [];
+let gameOverCount = parseInt(localStorage.getItem('momo_gameover_count') || '0');
+let isDragging = false;
+let timerInterval = null;
+
+function initGame() {
+  if (phase === 1) return;
+  phase = 1;
+  count = 100000;
+  timeLeft = 60;
+  holdingCount = 0;
+  lastMultiply = Date.now();
+
+  sendGA4Event('game_start');
+
+  timerInterval = setInterval(() => {
+    if (phase === 1 && timeLeft > 0) {
+      timeLeft--;
+
+      // 爆発栗（EX栗）の湧き
+      const progress = (60 - timeLeft) / 60;
+      if (Math.random() < 0.2 + (progress * 0.25) && bombManjus.length < 3) {
+        bombManjus.push({
+          x: 50 + Math.random() * 260,
+          y: 180 + Math.random() * 280,
+          r: 18
+        });
+      }
+    } else if (timeLeft <= 0 && phase === 1) {
+      phase = 2;
+      sendGA4Event('game_clear', { remaining_time: timeLeft });
+      clearInterval(timerInterval);
+    }
+  }, 1000);
+
+  gameLoop();
+}
+
+function gameLoop() {
+  update();
+  draw();
+  if (phase === 1) requestAnimationFrame(gameLoop);
+}
+
+function update() {
+  if (phase !== 1) return;
+  const now = Date.now();
+
+  // 1. 増殖（1.0s->0.08s, 1.4倍->2.0倍）
+  const progress = (60 - timeLeft) / 60;
+  const interval = 1000 - (progress * 920);
+  const mult = 1.4 + (progress * 0.6);
+
+  if (now - lastMultiply > interval) {
+    count = Math.min(maxCount, Math.ceil(count * mult));
+    
+    // 2. KIDちゃんの自動処理（弱体化）
+    if (kidState === 'NORMAL') {
+      const eat = Math.ceil(count * 0.03) + 10;
+      count = Math.max(1000, count - eat);
+    } else if (kidState === 'GUTS') {
+      const eat = Math.ceil(count * 0.10) + 30;
+      count = Math.max(500, count - eat);
+    }
+
+    lastMultiply = now;
+  }
+
+  // KIDちゃんのアニメーション切り替え (0.15秒毎)
+  if (now - kidAnimTimer > 150) {
+    kidAnimFrame = (kidAnimFrame + 1) % kidWorkFrames.length;
+    kidAnimTimer = now;
+  }
+
+  // 3. 納品エリア到達判定
+  if (playerX >= deliverPoint.x && playerX <= deliverPoint.x + deliverPoint.w &&
+      playerY >= deliverPoint.y && playerY <= deliverPoint.y + deliverPoint.h) {
+    if (holdingCount > 0) {
+      const deliveredEat = Math.ceil(count * (0.05 * holdingCount));
+      count = Math.max(0, count - deliveredEat);
+      holdingCount = 0;
+    }
+  }
+
+  // 4. ピンチ＆ゲームオーバー
+  const fillRatio = Math.min(1.0, Math.log10(count) / Math.log10(maxCount));
+  if (fillRatio >= 0.75) container.classList.add('pinch-mode');
+  else container.classList.remove('pinch-mode');
+
+  if (count >= maxCount) {
+    phase = 3;
+    gameOverCount++;
+    localStorage.setItem('momo_gameover_count', gameOverCount.toString());
+    sendGA4Event('game_over', { final_count: count, attempts: gameOverCount });
+  }
+
+  // UI更新
+  document.getElementById('count-txt').innerText = count.toLocaleString();
+  document.getElementById('holding-txt').innerText = holdingCount;
+  document.getElementById('time-txt').innerText = timeLeft;
+
+  const msg = document.getElementById('status-msg');
+  if (kidState === 'CHOKED') {
+    msg.innerText = "【ピンチ！】KIDが喉を詰まらせた！連打で救出！";
+    msg.style.color = "#ff4444";
+  } else if (holdingCount >= maxHolding) {
+    msg.innerText = "【満タン！】右下の納品エリアへ急げ！";
+    msg.style.color = "#ffeb3b";
+  } else {
+    msg.innerText = "栗を拾い（最大10個）、右下へ運んで納品せよ！";
+    msg.style.color = "#ffffff";
+  }
+}
+
+function draw() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  // 背景描画
+  if (images.bg && images.bg.complete) {
+    ctx.drawImage(images.bg, 0, 0, canvas.width, canvas.height);
+  }
+
+  // --- クリア画面 ---
+  if (phase === 2) {
+    container.classList.remove('pinch-mode');
+    ctx.fillStyle = 'rgba(5, 5, 16, 0.9)'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = '#ffcc00'; ctx.font = 'bold 20px sans-serif';
+    ctx.fillText("【100億個誤出荷クリア！】", 45, 260);
+    ctx.font = '13px sans-serif'; ctx.fillStyle = '#fff';
+    ctx.fillText("ももちゃん「あいつ……むちゃしやがって。」", 40, 320);
+    return;
+  }
+
+  // --- 3段階ゲームオーバー演出 ---
+  if (phase === 3) {
+    container.classList.remove('pinch-mode');
+    ctx.fillStyle = 'rgba(26, 0, 0, 0.92)'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = '#ff4444'; ctx.font = 'bold 22px sans-serif';
+    ctx.fillText("100億個突破：GAME OVER", 35, 220);
+
+    ctx.font = 'bold 15px sans-serif'; ctx.fillStyle = '#ffeb3b';
+    if (gameOverCount === 1) ctx.fillText("【1回目】厨房が栗まんじゅうで完全埋没！", 30, 300);
+    else if (gameOverCount === 2) ctx.fillText("【2回目】KIDちゃんが袋詰めに絶望して逃走！", 25, 300);
+    else ctx.fillText("【3回目〜】地球全体が栗まんじゅうに呑み込まれた…", 15, 300);
+    
+    ctx.font = '12px sans-serif'; ctx.fillStyle = '#aaa';
+    ctx.fillText(`通算失敗回数: ${gameOverCount}回`, 120, 360);
+    return;
+  }
+
+  // --- メインゲーム描画 ---
+  const fillRatio = Math.min(1.0, Math.log10(count) / Math.log10(maxCount));
+
+  // 1. 栗の積もり具合（段階的画像切り替え）
+  let currentStackImg = images.stack_s;
+  if (fillRatio > 0.7) currentStackImg = images.stack_l;
+  else if (fillRatio > 0.4) currentStackImg = images.stack_m;
+
+  if (currentStackImg && currentStackImg.complete) {
+    const stackH = fillRatio * 320;
+    ctx.drawImage(currentStackImg, 10, canvas.height - stackH - 80, 340, stackH + 80);
+  }
+
+  // 2. 納品エリア（右下）
+  ctx.fillStyle = 'rgba(76, 175, 80, 0.35)';
+  ctx.fillRect(deliverPoint.x, deliverPoint.y, deliverPoint.w, deliverPoint.h);
+  ctx.strokeStyle = '#4caf50'; ctx.lineWidth = 3;
+  ctx.strokeRect(deliverPoint.x, deliverPoint.y, deliverPoint.w, deliverPoint.h);
+  ctx.fillStyle = '#fff'; ctx.font = 'bold 12px sans-serif';
+  ctx.fillText("📦納品所", deliverPoint.x + 18, deliverPoint.y + 50);
+
+  // 3. KIDちゃんアニメーション描画（左下）
+  let kidImgKey = kidWorkFrames[kidAnimFrame];
+  if (kidState === 'CHOKED') kidImgKey = 'kid_choked';
+  else if (kidState === 'GUTS') kidImgKey = 'kid_guts';
+
+  if (images[kidImgKey] && images[kidImgKey].complete) {
+    ctx.drawImage(images[kidImgKey], kidX, kidY, kidW, kidH);
+  }
+
+  // 4. 爆発栗まんじゅう（EX栗）
+  bombManjus.forEach(b => {
+    if (images.kurimanju && images.kurimanju.complete) {
+      ctx.drawImage(images.kurimanju, b.x - b.r, b.y - b.r, b.r * 2, b.r * 2);
+    }
+    // 黒背景＋危険エフェクト
+    ctx.fillStyle = 'rgba(255, 0, 0, 0.4)';
+    ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#ff3300'; ctx.font = 'bold 10px sans-serif';
+    ctx.fillText("💥", b.x - 6, b.y + 4);
+  });
+
+  // 5. プレイヤー（移動・ドラッグ操作位置）
+  if (images.kurimanju && images.kurimanju.complete) {
+    ctx.drawImage(images.kurimanju, playerX - 18, playerY - 18, 36, 36);
+  }
+  ctx.fillStyle = '#ffeb3b'; ctx.font = 'bold 14px sans-serif';
+  ctx.fillText(`🍑${holdingCount}`, playerX - 12, playerY - 22);
+}
+
+// 操作処理
+function handleInput(x, y) {
+  if (phase !== 1) return;
+  playerX = x; playerY = y;
+
+  // KIDちゃんタップ救出
+  if (x >= kidX && x <= kidX + kidW && y >= kidY && y <= kidY + kidH) {
+    if (kidState === 'CHOKED') {
+      kidState = 'GUTS';
+      sendGA4Event('kid_binta');
+      setTimeout(() => { kidState = 'NORMAL'; }, 3500);
+    }
+  }
+
+  // 栗を拾う（上限10個）
+  if (holdingCount < maxHolding) {
+    holdingCount = Math.min(maxHolding, holdingCount + 1);
+  }
+
+  // 爆発栗（EX栗）接触判定
+  for (let i = bombManjus.length - 1; i >= 0; i--) {
+    const b = bombManjus[i];
+    const dist = Math.hypot(x - b.x, y - b.y);
+    
+    if (dist < 22 + b.r) {
+      bombManjus.splice(i, 1);
+      holdingCount = 0; // 全ドロップ
+      kidState = 'CHOKED'; // 強制喉詰まり
+      
+      container.classList.add('flash-bg');
+      setTimeout(() => container.classList.remove('flash-bg'), 200);
+      break;
+    }
+  }
+}
+
+// タッチ＆マウスイベント
+canvas.addEventListener('mousedown', (e) => { isDragging = true; const r = canvas.getBoundingClientRect(); handleInput(e.clientX - r.left, e.clientY - r.top); });
+canvas.addEventListener('mousemove', (e) => { if (isDragging) { const r = canvas.getBoundingClientRect(); handleInput(e.clientX - r.left, e.clientY - r.top); } });
+window.addEventListener('mouseup', () => { isDragging = false; });
+
+canvas.addEventListener('touchstart', (e) => { isDragging = true; const r = canvas.getBoundingClientRect(); handleInput(e.touches[0].clientX - r.left, e.touches[0].clientY - r.top); }, { passive: true });
+canvas.addEventListener('touchmove', (e) => { if (isDragging) { const r = canvas.getBoundingClientRect(); handleInput(e.touches[0].clientX - r.left, e.clientY - r.top); } }, { passive: true });
+window.addEventListener('touchend', () => { isDragging = false; });
+</script>
+</body>
+</html>
