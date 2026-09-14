@@ -1,0 +1,540 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>ももちゃんのくりまんじゅうビッグバン</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      touch-action: none;
+      -webkit-touch-callout: none;
+      -webkit-user-select: none;
+      user-select: none;
+    }
+    html, body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      background: #111;
+      font-family: sans-serif;
+    }
+    #game-container {
+      position: relative;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+    }
+    canvas {
+      display: block;
+      background: #2b1d0c;
+    }
+    .ui-top {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      right: 10px;
+      background: rgba(0, 0, 0, 0.85);
+      padding: 8px 12px;
+      border-radius: 8px;
+      font-weight: bold;
+      font-size: 12px;
+      color: #fff;
+      text-align: left;
+      pointer-events: none;
+    }
+    .ui-money { color: #55ff55; font-size: 14px; font-weight: bold; }
+    #status-msg {
+      position: absolute;
+      bottom: 12px;
+      left: 10px;
+      right: 10px;
+      color: #ffeb3b;
+      font-weight: bold;
+      font-size: 12px;
+      background: rgba(0, 0, 0, 0.85);
+      padding: 8px;
+      border-radius: 6px;
+      text-align: center;
+      pointer-events: none;
+    }
+    
+    @keyframes red-flash {
+      0% { box-shadow: inset 0 0 10px rgba(255, 0, 0, 0.3); }
+      50% { box-shadow: inset 0 0 70px rgba(255, 0, 0, 0.95); }
+      100% { box-shadow: inset 0 0 10px rgba(255, 0, 0, 0.3); }
+    }
+    .pinch-mode { animation: red-flash 0.3s infinite; }
+
+    @keyframes white-flash {
+      0% { background: #fff; }
+      100% { background: #2b1d0c; }
+    }
+    .flash-bg { animation: white-flash 0.2s ease-out; }
+  </style>
+</head>
+<body>
+
+  <div id="game-container">
+    <canvas id="canvas"></canvas>
+    
+    <div class="ui-top">
+      <div>売上金: <span class="ui-money" id="money-txt">0 円</span> | 残り: <span id="time-txt">120</span> 秒</div>
+      <div style="color: #ffcc00; font-size: 14px; margin: 2px 0;">くりまんじゅう: <span id="count-txt">1,000,000</span> 個</div>
+      <div>皿: <span id="holding-txt">0</span>/15 (金:<span id="gold-txt">0</span>) | 客: <span id="served-txt">0</span>/10人</div>
+    </div>
+
+    <div id="status-msg">栗の増殖を抑え込み、100億個での埋没を防げ！</div>
+  </div>
+
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const container = document.getElementById('game-container');
+
+let BASE_W = 360;
+let BASE_H = 640;
+
+function resizeCanvas() {
+  const windowW = window.innerWidth;
+  const windowH = window.innerHeight;
+  let targetW = windowW;
+  let targetH = windowW * (16 / 9);
+
+  if (targetH > windowH) {
+    targetH = windowH;
+    targetW = windowH * (9 / 16);
+  }
+
+  canvas.width = BASE_W;
+  canvas.height = BASE_H;
+  canvas.style.width = `${targetW}px`;
+  canvas.style.height = `${targetH}px`;
+}
+window.addEventListener('resize', resizeCanvas);
+resizeCanvas();
+
+// --- ゲームステート ---
+let count = 1000000; // 初期100万個（絶対に0にならない）
+const maxCount = 10000000000; // 100億個でパンク
+const minCount = 100000; // 最低保証10万個（これ以下には絶対に減らない）
+let timeLeft = 120;
+let money = 0;
+let servedCustomerCount = 0;
+let phase = 1;
+
+// プレイヤー
+let player = { x: 100, y: 300, r: 16, holding: 0, goldHolding: 0, maxHolding: 15, stunnedUntil: 0 };
+let lastServeTime = 0;
+
+// フィーバー・必殺技状態
+let conveyorFeverUntil = 0;
+let kidDysonUntil = 0;
+
+// 特殊要素
+let bombManjus = [];
+let goldManjus = [];
+let ojisan = null;
+
+// ベルトコンベア
+let conveyorUnlocked = false;
+let conveyorBox = 0;
+let conveyorX = 140, conveyorY = 285;
+
+// KIDちゃん
+let kid = { x: 310, y: 300, w: 40, h: 40, stock: 0, maxStock: 2, lastEat: Date.now() };
+
+// 客
+let customers = [];
+let servedTableCustomers = [];
+const maxTableSeats = 12;
+
+let lastSubSecond = Date.now();
+
+function spawnCustomer() {
+  if (customers.length < 8) {
+    const isVip = Math.random() < 0.25;
+    const needed = isVip ? 15 : 5;
+    customers.push({ id: Date.now(), isVip: isVip, itemsNeeded: needed, itemsRemaining: needed });
+  }
+}
+for(let i=0; i<5; i++) spawnCustomer();
+
+// 1秒タイマー
+const timerInterval = setInterval(() => {
+  if (phase === 1 && timeLeft > 0) {
+    timeLeft--;
+    spawnCustomer();
+
+    if (Math.random() < 0.25 && bombManjus.length < 3) {
+      bombManjus.push({ x: 30 + Math.random() * 300, y: 40 + Math.random() * 180, r: 12 });
+    }
+    if (Math.random() < 0.22 && goldManjus.length < 2) {
+      goldManjus.push({ x: 30 + Math.random() * 300, y: 40 + Math.random() * 180, r: 14 });
+    }
+    if (!ojisan && Math.random() < 0.15) {
+      ojisan = { x: -20, y: 420 + Math.random() * 140, vx: 2 };
+    }
+
+  } else if (timeLeft <= 0 && phase === 1) {
+    phase = 2;
+    clearInterval(timerInterval);
+  }
+}, 1000);
+
+function gameLoop() {
+  update();
+  draw();
+  if (phase === 1) requestAnimationFrame(gameLoop);
+}
+
+function update() {
+  if (phase !== 1) return;
+  const now = Date.now();
+
+  // コンベア解放判定
+  if (!conveyorUnlocked && servedCustomerCount >= 10) {
+    conveyorUnlocked = true;
+  }
+
+  // 1. 増殖ロジック（絶え間なく増え続ける）
+  if (now - lastSubSecond >= 100) {
+    const progress = (120 - timeLeft) / 120;
+    let mult = 1.005 + Math.pow(progress, 2.3) * 0.025; // 後半ほど爆発的増加
+    count = Math.min(maxCount, Math.max(minCount, Math.ceil(count * mult)));
+    lastSubSecond = now;
+  }
+
+  // 2. KIDちゃんの消費（一時的に勢いを抑えるのみ）
+  if (now < kidDysonUntil) {
+    const dysonEat = Math.ceil(count * 0.015);
+    count = Math.max(minCount, count - dysonEat);
+  } else if (kid.stock > 0 && now - kid.lastEat >= 1200) {
+    kid.stock -= 1;
+    count = Math.max(minCount, count - 50);
+    kid.lastEat = now;
+  }
+
+  // 3. おじさん移動
+  if (ojisan) {
+    ojisan.x += ojisan.vx;
+    if (ojisan.x > BASE_W + 30) ojisan = null;
+    
+    if (ojisan && Math.hypot(player.x - ojisan.x, player.y - ojisan.y) < player.r + 15) {
+      player.holding = 0;
+      player.goldHolding = 0;
+      player.stunnedUntil = now + 500;
+    }
+  }
+
+  // 4. イートイン食事処理
+  for (let i = servedTableCustomers.length - 1; i >= 0; i--) {
+    let c = servedTableCustomers[i];
+    if (now - c.startEatTime > 3000) servedTableCustomers.splice(i, 1);
+  }
+
+  // 5. ベルトコンベア出荷（まとめて削る）
+  const boxLimit = (now < conveyorFeverUntil) ? 5 : 20;
+  if (conveyorUnlocked && conveyorBox >= boxLimit) {
+    const shipAmount = Math.ceil(count * 0.02) + 500; // 現在の栗の2%を削る
+    count = Math.max(minCount, count - shipAmount);
+    money += 20 * 500;
+    conveyorBox = 0;
+  }
+
+  // 6. ピンチ＆ゲームオーバー判定
+  const fillRatio = Math.min(1.0, count / maxCount);
+  if (fillRatio >= 0.75) container.classList.add('pinch-mode');
+  else container.classList.remove('pinch-mode');
+
+  if (count >= maxCount) phase = 3; // 100億個でゲームオーバー
+
+  // UI更新
+  document.getElementById('count-txt').innerText = count.toLocaleString();
+  document.getElementById('money-txt').innerText = money.toLocaleString() + " 円";
+  document.getElementById('holding-txt').innerText = player.holding;
+  document.getElementById('gold-txt').innerText = player.goldHolding;
+  document.getElementById('served-txt').innerText = servedCustomerCount;
+  document.getElementById('time-txt').innerText = timeLeft;
+
+  const msg = document.getElementById('status-msg');
+  if (now < kidDysonUntil) {
+    msg.innerText = "🌀 KID「ごほごほ！吸い込んで時間を稼いでるよ！」";
+    msg.style.color = "#55ff55";
+  } else if (now < conveyorFeverUntil) {
+    msg.innerText = "✨ 金の栗効果！コンベア超爆速出荷中！！";
+    msg.style.color = "#ffeb3b";
+  } else if (now < player.stunnedUntil) {
+    msg.innerText = "💥 事故発生！操作不能！";
+    msg.style.color = "#ff4444";
+  } else if (conveyorUnlocked) {
+    msg.innerText = "コンベアへ20個流し込んで大量出荷！増殖を食い止めろ！";
+    msg.style.color = "#55ff55";
+  } else {
+    msg.innerText = "客に提供して10人達成し、コンベアを解放せよ！";
+    msg.style.color = "#ffffff";
+  }
+}
+
+function draw() {
+  ctx.clearRect(0, 0, BASE_W, BASE_H);
+
+  if (phase === 2) {
+    container.classList.remove('pinch-mode');
+    ctx.fillStyle = '#050510'; ctx.fillRect(0, 0, BASE_W, BASE_H);
+    ctx.fillStyle = '#ffcc00'; ctx.font = 'bold 18px sans-serif';
+    ctx.fillText("【2分間耐え切りクリア！】", 60, 220);
+    ctx.font = '14px sans-serif'; ctx.fillStyle = '#55ff55';
+    ctx.fillText(`最終売上：${money.toLocaleString()} 円`, 70, 270);
+    
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 13px sans-serif';
+    if (money >= 1000000) {
+      ctx.fillText("やったねKIDちゃん！【金閣寺】が建ったよ！", 30, 340);
+      ctx.fillText("トイレも全部金ピカだよ！！", 60, 370);
+    } else if (money >= 500000) {
+      ctx.fillText("やったね！シックで粋な【銀閣寺】が建ったよ！", 25, 340);
+    } else {
+      ctx.fillText("なんとか耐えた！【銅閣寺】が建ったよ！", 40, 340);
+    }
+    return;
+  }
+
+  if (phase === 3) {
+    container.classList.remove('pinch-mode');
+    ctx.fillStyle = '#1a0000'; ctx.fillRect(0, 0, BASE_W, BASE_H);
+    ctx.fillStyle = '#ff4444'; ctx.font = 'bold 20px sans-serif';
+    ctx.fillText("100億個突破！", 100, 250);
+    ctx.fillText("GAME OVER", 110, 290);
+    ctx.font = '13px sans-serif'; ctx.fillStyle = '#aaa';
+    ctx.fillText("厨房とお店が栗で完全埋没した…", 60, 340);
+    return;
+  }
+
+  // 1. 厨房エリア
+  const fillRatio = Math.min(1.0, count / maxCount);
+  const fillH = fillRatio * 220;
+  ctx.fillStyle = '#5c2c09'; ctx.fillRect(0, 260 - fillH, BASE_W, fillH);
+  
+  ctx.fillStyle = '#c68642';
+  for (let i = 0; i < Math.min(40, Math.floor(fillRatio * 40)); i++) {
+    const rx = 20 + ((i * 37) % 320);
+    const ry = 250 - fillH + ((i * 19) % Math.max(10, fillH));
+    ctx.beginPath(); ctx.arc(rx, ry, 6, 0, Math.PI*2); ctx.fill();
+  }
+
+  // 爆発栗
+  bombManjus.forEach(b => {
+    ctx.fillStyle = '#111'; ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, Math.PI*2); ctx.fill();
+    ctx.strokeStyle = '#ff3300'; ctx.lineWidth = 2; ctx.stroke();
+    ctx.fillStyle = '#ff5500'; ctx.font = 'bold 9px sans-serif'; ctx.fillText("💥", b.x - 5, b.y + 3);
+  });
+
+  // 金の栗✨
+  goldManjus.forEach(g => {
+    ctx.fillStyle = '#ffd700'; ctx.beginPath(); ctx.arc(g.x, g.y, g.r, 0, Math.PI*2); ctx.fill();
+    ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.stroke();
+    ctx.fillStyle = '#000'; ctx.font = 'bold 9px sans-serif'; ctx.fillText("🌟金", g.x - 8, g.y + 3);
+  });
+
+  // 2. カウンター ＆ コンベア
+  ctx.fillStyle = '#8d6e63'; ctx.fillRect(0, 310, BASE_W, 12);
+
+  if (conveyorUnlocked) {
+    const isFever = Date.now() < conveyorFeverUntil;
+    ctx.fillStyle = isFever ? '#ff6f00' : '#424242'; ctx.fillRect(100, 280, 140, 25);
+    ctx.strokeStyle = isFever ? '#ffd700' : '#ffb300'; ctx.lineWidth = 2; ctx.strokeRect(100, 280, 140, 25);
+    ctx.fillStyle = '#d7ccc8'; ctx.fillRect(conveyorX, conveyorY, 35, 20);
+    ctx.fillStyle = '#3e2723'; ctx.font = 'bold 10px sans-serif';
+    ctx.fillText(`📦${conveyorBox}/20`, conveyorX + 2, conveyorY + 14);
+  } else {
+    ctx.fillStyle = '#555'; ctx.font = '10px sans-serif';
+    ctx.fillText("【10人達成でコンベア設置】", 110, 295);
+  }
+
+  // KIDちゃん
+  const isDyson = Date.now() < kidDysonUntil;
+  ctx.fillStyle = isDyson ? '#00e676' : (kid.stock >= kid.maxStock ? '#ff9100' : '#795548');
+  ctx.fillRect(kid.x, kid.y, kid.w, kid.h);
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = 1; ctx.strokeRect(kid.x, kid.y, kid.w, kid.h);
+  ctx.fillStyle = '#fff'; ctx.font = 'bold 9px sans-serif';
+  ctx.fillText(isDyson ? "🌀吸込" : "🐿️KID", kid.x + 2, kid.y + 14);
+  ctx.fillText(kid.stock >= kid.maxStock ? "【TAP】" : `${kid.stock}/${kid.maxStock}`, kid.x + 2, kid.y + 30);
+
+  // 3. レジ行列
+  customers.forEach((c, idx) => {
+    const cx = 30 + (idx * 35);
+    const cy = 360;
+    ctx.fillStyle = c.isVip ? '#ffd700' : '#2196f3';
+    ctx.beginPath(); ctx.arc(cx, cy - 10, c.isVip ? 10 : 8, 0, Math.PI*2); ctx.fill();
+    ctx.fillRect(cx - 5, cy - 2, 10, 15);
+    
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 9px sans-serif';
+    ctx.fillText(`${c.itemsRemaining}`, cx - 3, cy - 22);
+    if (c.isVip) { ctx.fillStyle = '#ffea00'; ctx.fillText("👑", cx - 4, cy - 32); }
+  });
+
+  // 4. ちんすこうおじさん
+  if (ojisan) {
+    ctx.fillStyle = '#9e9e9e'; ctx.beginPath(); ctx.arc(ojisan.x, ojisan.y, 12, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 10px sans-serif'; ctx.fillText("👴退治", ojisan.x - 12, ojisan.y + 4);
+  }
+
+  // 5. イートインスペース
+  const tables = [{x: 60, y: 480}, {x: 180, y: 480}, {x: 300, y: 480}];
+  tables.forEach((t) => {
+    ctx.fillStyle = '#a1887f'; ctx.beginPath(); ctx.arc(t.x, t.y, 30, 0, Math.PI*2); ctx.fill();
+    ctx.strokeStyle = '#5d4037'; ctx.lineWidth = 2; ctx.stroke();
+    const chairs = [{x: t.x-38, y: t.y}, {x: t.x+38, y: t.y}, {x: t.x, y: t.y-38}, {x: t.x, y: t.y+38}];
+    chairs.forEach(ch => {
+      ctx.fillStyle = '#8d6e63'; ctx.beginPath(); ctx.arc(ch.x, ch.y, 8, 0, Math.PI*2); ctx.fill();
+    });
+  });
+
+  servedTableCustomers.forEach((c, idx) => {
+    const tIdx = idx % 3;
+    const seatIdx = Math.floor(idx / 3) % 4;
+    const t = tables[tIdx];
+    const offsets = [{x:-38,y:0}, {x:38,y:0}, {x:0,y:-38}, {x:0,y:38}];
+    const pos = offsets[seatIdx];
+    ctx.fillStyle = '#1e88e5';
+    ctx.beginPath(); ctx.arc(t.x + pos.x, t.y + pos.y - 4, 7, 0, Math.PI*2); ctx.fill();
+  });
+
+  // 6. プレイヤー（ももちゃん）
+  const isStunned = Date.now() < player.stunnedUntil;
+  ctx.fillStyle = isStunned ? '#ff4444' : (player.goldHolding > 0 ? '#ffd700' : '#ffeb3b');
+  ctx.beginPath(); ctx.arc(player.x, player.y, player.r, 0, Math.PI*2); ctx.fill();
+  ctx.strokeStyle = '#d2691e'; ctx.lineWidth = 3; ctx.stroke();
+  ctx.fillStyle = '#000'; ctx.font = 'bold 10px sans-serif';
+  ctx.fillText(`🍑${player.holding}`, player.x - 10, player.y + 4);
+}
+
+function getCanvasCoords(e) {
+  const rect = canvas.getBoundingClientRect();
+  const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+  const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+  const x = (clientX - rect.left) * (BASE_W / rect.width);
+  const y = (clientY - rect.top) * (BASE_H / rect.height);
+  return { x, y };
+}
+
+function handleInput(e) {
+  if (phase !== 1) return;
+  const now = Date.now();
+  if (now < player.stunnedUntil) return;
+
+  let { x, y } = getCanvasCoords(e);
+  x = Math.max(20, Math.min(BASE_W - 20, x));
+  player.x = x; player.y = y;
+
+  // おじさんタップ退治
+  if (ojisan && Math.hypot(x - ojisan.x, y - ojisan.y) < 25) {
+    money += 30000;
+    ojisan = null;
+    return;
+  }
+
+  // KIDちゃんタップで必殺技
+  if (Math.abs(x - (kid.x + 20)) < 25 && Math.abs(y - (kid.y + 20)) < 25) {
+    if (kid.stock >= kid.maxStock) {
+      kid.stock = 0;
+      kidDysonUntil = now + 3000;
+      return;
+    }
+  }
+
+  // A. 厨房で栗採取 (y < 240)
+  if (y < 240 && player.holding < player.maxHolding) {
+    for (let i = goldManjus.length - 1; i >= 0; i--) {
+      let g = goldManjus[i];
+      if (Math.hypot(x - g.x, y - g.y) < player.r + g.r + 10) {
+        goldManjus.splice(i, 1);
+        player.goldHolding++;
+        player.holding++;
+        break;
+      }
+    }
+    if (player.holding < player.maxHolding) {
+      player.holding++;
+    }
+  }
+
+  // 爆発栗判定
+  for (let i = bombManjus.length - 1; i >= 0; i--) {
+    let b = bombManjus[i];
+    if (Math.hypot(x - b.x, y - b.y) < player.r + b.r) {
+      bombManjus.splice(i, 1);
+      player.stunnedUntil = now + 500;
+      container.classList.add('flash-bg');
+      setTimeout(() => container.classList.remove('flash-bg'), 200);
+      return;
+    }
+  }
+
+  // B. カウンターでの提供・給餌・コンベア搬入 (270 <= y <= 340)
+  if (y >= 270 && y <= 340) {
+    if (now - lastServeTime > 300) {
+      
+      // 1. 客への提供
+      if (customers.length > 0 && player.holding > 0) {
+        let c = customers[0];
+        const deliverAmount = Math.min(player.holding, c.itemsRemaining);
+        
+        player.holding -= deliverAmount;
+        c.itemsRemaining -= deliverAmount;
+
+        if (player.goldHolding > 0) {
+          player.goldHolding--;
+          conveyorFeverUntil = now + 4000;
+        }
+
+        // 栗の総量を減らす（時間を稼ぐ）
+        count = Math.max(minCount, count - deliverAmount * 100);
+        money += deliverAmount * 500;
+        lastServeTime = now;
+
+        if (c.itemsRemaining <= 0) {
+          customers.shift();
+          servedCustomerCount++;
+          if (servedTableCustomers.length < maxTableSeats) {
+            servedTableCustomers.push({ startEatTime: now });
+          }
+        }
+      }
+
+      // 2. ベルトコンベアへの箱詰め
+      if (conveyorUnlocked && player.holding > 0 && Math.abs(x - (conveyorX + 15)) < 30) {
+        const put = Math.min(player.holding, 20 - conveyorBox);
+        player.holding -= put;
+        conveyorBox += put;
+        lastServeTime = now;
+      }
+
+      // 3. KIDちゃんへの給餌
+      if (player.holding > 0 && Math.abs(x - (kid.x + 20)) < 30) {
+        const give = Math.min(player.holding, kid.maxStock - kid.stock);
+        player.holding -= give;
+        kid.stock += give;
+        lastServeTime = now;
+      }
+    }
+  }
+}
+
+let isTouching = false;
+window.addEventListener('touchstart', (e) => { isTouching = true; handleInput(e); }, { passive: false });
+window.addEventListener('touchmove', (e) => { if (isTouching) { e.preventDefault(); handleInput(e); } }, { passive: false });
+window.addEventListener('touchend', () => { isTouching = false; });
+
+canvas.addEventListener('mousedown', (e) => { isTouching = true; handleInput(e); });
+canvas.addEventListener('mousemove', (e) => { if (isTouching) handleInput(e); });
+window.addEventListener('mouseup', () => { isTouching = false; });
+
+gameLoop();
+</script>
+</body>
+</html>
